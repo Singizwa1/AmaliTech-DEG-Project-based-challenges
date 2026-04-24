@@ -27,13 +27,13 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: app/package-lock.json
+          cache-dependency-path: dev-ops/DeployReady/app/package-lock.json
 
       # Install dependencies and run tests
       # Pipeline stops here if tests fail
       - name: Install and test
         run: |
-          cd app
+          cd dev-ops/DeployReady/app
           npm ci
           npm test
 
@@ -69,8 +69,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./dev-ops/DeployReady
+          file: ./dev-ops/DeployReady/Dockerfile
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}

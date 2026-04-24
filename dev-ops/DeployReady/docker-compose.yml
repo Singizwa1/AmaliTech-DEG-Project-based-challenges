@@ -1,0 +1,26 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PORT: ${PORT:-3000}
+      NODE_ENV: ${NODE_ENV:-production}
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    volumes:
+      - app-logs:/app/logs
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - const http=require('http');const port=process.env.PORT||3000;const req=http.get('http://127.0.0.1:'+port+'/health',res=>process.exit(res.statusCode===200?0:1));req.on('error',()=>process.exit(1));
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  app-logs:

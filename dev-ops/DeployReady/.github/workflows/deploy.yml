@@ -1,0 +1,130 @@
+name: CI/CD Pipeline
+
+# Trigger on every push to main branch
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/singizwa1/amalitech-deg-project-based-challenges
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1: Run tests before anything else
+  # ─────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Setup Node.js environment
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      # Install dependencies and run tests
+      # Pipeline stops here if tests fail
+      - name: Install and test
+        run: |
+          cd app
+          npm ci
+          npm test
+
+  # ─────────────────────────────────────────
+  # JOB 2: Build and push Docker image
+  # Only runs if tests pass
+  # ─────────────────────────────────────────
+  build-and-push:
+    name: Build and Push Image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # Checkout the repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Log in to GitHub Container Registry
+      # Uses REGISTRY_TOKEN secret — never hardcoded
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      # Build and push image with two tags:
+      # 1. commit SHA (exact version tracking)
+      # 2. latest (always points to newest)
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+
+  # ─────────────────────────────────────────
+  # JOB 3: Deploy to EC2
+  # Only runs if build-and-push passes
+  # ─────────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      # Checkout code to access deploy scripts
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # SSH into EC2 and deploy the new container
+      # All sensitive values come from GitHub Secrets
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Pull the latest Docker image
+            docker pull ${{ env.IMAGE_NAME }}:latest
+
+            # Stop and remove old container if running
+            docker stop app || true
+            docker rm app || true
+
+            # Start new container on port 80
+            docker run -d \
+              --name app \
+              --restart unless-stopped \
+              -p 80:3000 \
+              -e PORT=3000 \
+              -e NODE_ENV=production \
+              ${{ env.IMAGE_NAME }}:latest
+
+            # Health check — if fails, rollback to previous image
+            sleep 5
+            curl -f http://localhost/health || \
+            (docker stop app && \
+             docker rm app && \
+             docker run -d \
+               --name app \
+               --restart unless-stopped \
+               -p 80:3000 \
+               -e PORT=3000 \
+               -e NODE_ENV=production \
+               ${{ env.IMAGE_NAME }}:${{ github.sha }} && \
+             exit 1)

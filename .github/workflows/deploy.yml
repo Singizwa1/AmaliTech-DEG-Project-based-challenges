@@ -12,6 +12,7 @@ env:
 jobs:
   # ─────────────────────────────────────────
   # JOB 1: Run tests before anything else
+  # If tests fail, pipeline stops completely
   # ─────────────────────────────────────────
   test:
     name: Run Tests
@@ -21,7 +22,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Setup Node.js environment
+      # Setup Node.js 20 environment
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -30,7 +31,6 @@ jobs:
           cache-dependency-path: dev-ops/DeployReady/app/package-lock.json
 
       # Install dependencies and run tests
-      # Pipeline stops here if tests fail
       - name: Install and test
         run: |
           cd dev-ops/DeployReady/app
@@ -38,7 +38,8 @@ jobs:
           npm test
 
   # ─────────────────────────────────────────
-  # JOB 2: Build and push Docker image
+  # JOB 2: Build Docker image and push to
+  # GitHub Container Registry (ghcr.io)
   # Only runs if tests pass
   # ─────────────────────────────────────────
   build-and-push:
@@ -54,7 +55,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Log in to GitHub Container Registry
+      # Login to GitHub Container Registry
       # Uses REGISTRY_TOKEN secret — never hardcoded
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -64,20 +65,20 @@ jobs:
           password: ${{ secrets.REGISTRY_TOKEN }}
 
       # Build and push image with two tags:
-      # 1. commit SHA (exact version tracking)
-      # 2. latest (always points to newest)
+      # 1. commit SHA for exact version tracking
+      # 2. latest always points to newest image
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ./dev-ops/DeployReady
-          file: ./dev-ops/DeployReady/Dockerfile
+          context: dev-ops/DeployReady
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
             ${{ env.IMAGE_NAME }}:latest
 
   # ─────────────────────────────────────────
-  # JOB 3: Deploy to EC2
+  # JOB 3: Deploy to EC2 via AWS SSM
+  # No SSH needed — uses AWS secure channel
   # Only runs if build-and-push passes
   # ─────────────────────────────────────────
   deploy:
@@ -86,45 +87,38 @@ jobs:
     needs: build-and-push
 
     steps:
-      # Checkout code to access deploy scripts
+      # Checkout the repository code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # SSH into EC2 and deploy the new container
-      # All sensitive values come from GitHub Secrets
-      - name: Deploy to EC2 via SSH
-        uses: appleboy/ssh-action@v1
+      # Configure AWS credentials for SSM access
+      # Uses secrets — never hardcoded
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            # Pull the latest Docker image
-            docker pull ${{ env.IMAGE_NAME }}:latest
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-            # Stop and remove old container if running
-            docker stop app || true
-            docker rm app || true
+      # Send deployment commands to EC2 via SSM
+      # No port 22 needed — uses AWS secure channel
+      - name: Deploy via AWS SSM
+        run: |
+          aws ssm send-command \
+            --instance-ids ${{ secrets.EC2_INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "docker pull ${{ env.IMAGE_NAME }}:latest",
+              "docker stop app || true",
+              "docker rm app || true",
+              "docker run -d --name app --restart unless-stopped -p 80:3000 -e PORT=3000 -e NODE_ENV=production ${{ env.IMAGE_NAME }}:latest",
+              "sleep 5",
+              "curl -f http://localhost/health || (docker stop app && docker rm app && docker run -d --name app --restart unless-stopped -p 80:3000 -e PORT=3000 ${{ env.IMAGE_NAME }}:${{ github.sha }} && exit 1)"
+            ]' \
+            --region ${{ secrets.AWS_REGION }}
 
-            # Start new container on port 80
-            docker run -d \
-              --name app \
-              --restart unless-stopped \
-              -p 80:3000 \
-              -e PORT=3000 \
-              -e NODE_ENV=production \
-              ${{ env.IMAGE_NAME }}:latest
-
-            # Health check — if fails, rollback to previous image
-            sleep 5
-            curl -f http://localhost/health || \
-            (docker stop app && \
-             docker rm app && \
-             docker run -d \
-               --name app \
-               --restart unless-stopped \
-               -p 80:3000 \
-               -e PORT=3000 \
-               -e NODE_ENV=production \
-               ${{ env.IMAGE_NAME }}:${{ github.sha }} && \
-             exit 1)
+      # Wait and verify deployment was successful
+      - name: Verify deployment
+        run: |
+          sleep 15
+          curl -f http://${{ secrets.EC2_HOST }}/health

@@ -100,25 +100,24 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Send deployment commands to EC2 via SSM
-      # No port 22 needed — uses AWS secure channel
+      # Login to ghcr.io on EC2 and deploy new container
+      # Uses SSM — no port 22 needed, security group stays correct
       - name: Deploy via AWS SSM
         run: |
           aws ssm send-command \
             --instance-ids ${{ secrets.EC2_INSTANCE_ID }} \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
-              "docker pull ${{ env.IMAGE_NAME }}:latest",
-              "docker stop app || true",
-              "docker rm app || true",
-              "docker run -d --name app --restart unless-stopped -p 80:3000 -e PORT=3000 -e NODE_ENV=production ${{ env.IMAGE_NAME }}:latest",
-              "sleep 5",
-              "curl -f http://localhost/health || (docker stop app && docker rm app && docker run -d --name app --restart unless-stopped -p 80:3000 -e PORT=3000 ${{ env.IMAGE_NAME }}:${{ github.sha }} && exit 1)"
-            ]' \
-            --region ${{ secrets.AWS_REGION }}
+            --parameters commands=["docker login ghcr.io -u singizwa1 -p ${{ secrets.REGISTRY_TOKEN }}","docker pull ${{ env.IMAGE_NAME }}:latest","docker stop app || true","docker rm app || true","docker run -d --name app --restart unless-stopped -p 80:3000 -e PORT=3000 -e NODE_ENV=production ${{ env.IMAGE_NAME }}:latest","sleep 5","curl -f http://localhost/health || (docker stop app && docker rm app && docker run -d --name app --restart unless-stopped -p 80:3000 -e PORT=3000 ${{ env.IMAGE_NAME }}:${{ github.sha }} && exit 1)"] \
+            --region ${{ secrets.AWS_REGION }} \
+            --output text \
+            --query 'Command.CommandId'
 
-      # Wait and verify deployment was successful
+      # Wait for SSM command to complete on EC2
+      - name: Wait for SSM command to complete
+        run: sleep 30
+
+      # Verify deployment was successful
+      # Hits public health endpoint to confirm app is running
       - name: Verify deployment
         run: |
-          sleep 15
           curl -f http://${{ secrets.EC2_HOST }}/health
